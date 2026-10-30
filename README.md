@@ -1,0 +1,2 @@
+# ai-sdd-workflow
+Social Media Command Center that consolidates content performance, identifies opportunities, recommends future content, and helps creators plan and publish across platforms, while keeping humans in control of publishing decisions.
