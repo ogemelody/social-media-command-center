@@ -111,3 +111,15 @@ def test_analytics_does_not_turn_missing_metrics_into_zero() -> None:
         assert isinstance(body["metrics"], list)
     finally:
         client.__exit__(None, None, None)
+
+
+def test_custom_analytics_range_requires_both_dates() -> None:
+    client = owner_client()
+    try:
+        response = client.get("/api/analytics/dashboard?range=custom&start_date=2026-11-01")
+        assert response.status_code == 422
+        assert (
+            response.json()["detail"] == "Custom ranges require both a start date and an end date"
+        )
+    finally:
+        client.__exit__(None, None, None)

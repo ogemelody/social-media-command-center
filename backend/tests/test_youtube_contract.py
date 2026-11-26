@@ -44,13 +44,17 @@ async def test_analytics_contract_maps_zero_as_a_real_value(
         "rows": [["2026-11-24", "video-1", 0, 0, 0, 0, 0, 0, 0]],
     }
     response = httpx.Response(200, json=payload)
+    request_params = {}
 
     async def fake_request(*args, **kwargs):
+        request_params.update(kwargs["params"])
         return response
 
     monkeypatch.setattr(client, "_request", fake_request)
-    metrics = await client.analytics("token", date(2026, 11, 24), date(2026, 11, 24))
+    metrics = await client.analytics("token", date(2026, 11, 24), date(2026, 11, 24), ["video-1"])
 
     views = next(metric for metric in metrics if metric.metric_key == "views")
     assert views.value == 0
     assert views.video_id == "video-1"
+    assert request_params["dimensions"] == "day,video"
+    assert request_params["filters"] == "video==video-1"

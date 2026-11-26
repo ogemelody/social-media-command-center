@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -6,13 +7,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
 from app.core.config import get_settings
 from app.db.session import create_schema
+from app.services.scheduler import scheduled_sync_loop
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     if settings.auto_create_schema:
         create_schema()
-    yield
+    stop_event = asyncio.Event()
+    scheduler_task = None
+    if settings.scheduled_sync_enabled:
+        scheduler_task = asyncio.create_task(scheduled_sync_loop(settings, stop_event))
+    try:
+        yield
+    finally:
+        if scheduler_task:
+            stop_event.set()
+            await scheduler_task
 
 
 settings = get_settings()

@@ -9,6 +9,7 @@ preview_frontend_port="5178"
 preview_backend_port="8001"
 preview_frontend_url="http://127.0.0.1:$preview_frontend_port"
 preview_backend_url="http://127.0.0.1:$preview_backend_port"
+preview_env_file="$preview_root/backend/.env"
 
 if [[ ! -x "$preview_python" || ! -x "$preview_uvicorn" ]]; then
   echo "Backend dependencies are missing. Run:"
@@ -25,8 +26,14 @@ if [[ ! -d "$preview_root/frontend/node_modules" ]]; then
 fi
 
 preview_password_hash="$($preview_python -m app.core.password_tool "$preview_password")"
-preview_token_key="$($preview_python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
 preview_session_secret="$($preview_python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+
+if [[ -f "$preview_env_file" ]]; then
+  preview_oauth_status="configured from backend/.env"
+else
+  preview_token_key="$($preview_python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+  preview_oauth_status="preview placeholders (YouTube connection disabled)"
+fi
 
 cleanup_preview() {
   if [[ -n "${preview_backend_pid:-}" ]]; then
@@ -40,13 +47,18 @@ trap cleanup_preview EXIT INT TERM
   export COMMANDOS_OWNER_EMAIL="owner@example.com"
   export COMMANDOS_OWNER_PASSWORD_HASH="$preview_password_hash"
   export COMMANDOS_SESSION_SECRET="$preview_session_secret"
-  export COMMANDOS_TOKEN_ENCRYPTION_KEY="$preview_token_key"
   export COMMANDOS_DATABASE_URL="sqlite:////tmp/commandos-preview.db"
   export COMMANDOS_AUTO_CREATE_SCHEMA="true"
   export COMMANDOS_FRONTEND_ORIGIN="$preview_frontend_url"
-  export GOOGLE_CLIENT_ID="preview-client"
-  export GOOGLE_CLIENT_SECRET="preview-secret"
-  export GOOGLE_REDIRECT_URI="$preview_backend_url/api/youtube/callback"
+  export COMMANDOS_SCHEDULED_SYNC_ENABLED="true"
+  export COMMANDOS_YOUTUBE_SYNC_INTERVAL_HOURS="24"
+  export COMMANDOS_YOUTUBE_SCHEDULER_POLL_SECONDS="60"
+  if [[ ! -f "$preview_env_file" ]]; then
+    export COMMANDOS_TOKEN_ENCRYPTION_KEY="$preview_token_key"
+    export GOOGLE_CLIENT_ID="preview-client"
+    export GOOGLE_CLIENT_SECRET="preview-secret"
+    export GOOGLE_REDIRECT_URI="$preview_backend_url/api/youtube/callback"
+  fi
   exec "$preview_uvicorn" app.main:app --host 127.0.0.1 --port "$preview_backend_port"
 ) &
 preview_backend_pid=$!
@@ -56,6 +68,7 @@ echo "CommandOS preview"
 echo "URL:      $preview_frontend_url"
 echo "Email:    owner@example.com"
 echo "Password: $preview_password"
+echo "YouTube:  $preview_oauth_status"
 echo
 echo "Keep this terminal open. Press Ctrl+C to stop the preview."
 echo

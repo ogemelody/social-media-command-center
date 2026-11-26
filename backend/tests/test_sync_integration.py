@@ -28,8 +28,9 @@ class FakeYouTubeClient:
         return [YouTubeVideo("video-integration", "Feature 001", datetime.now(UTC), 120)]
 
     async def analytics(
-        self, access_token: str, start_date: date, end_date: date
+        self, access_token: str, start_date: date, end_date: date, video_ids: list[str]
     ) -> list[MetricValue]:
+        assert video_ids == ["video-integration"]
         return [MetricValue("video-integration", end_date, "views", "count", 0)]
 
 
@@ -55,13 +56,20 @@ async def test_sync_is_idempotent_and_preserves_real_zero() -> None:
         duplicate = service.create_run(connection, "same-request")
 
         assert duplicate.id == run.id
+        assert service.active_run(connection.id).id == run.id
 
         await service.execute(run.id)
         session.expire_all()
 
         completed = session.get(SyncRun, run.id)
-        observation = session.scalar(select(MetricObservation))
-        content_count = session.scalar(select(func.count()).select_from(ContentItem))
+        observation = session.scalar(
+            select(MetricObservation).where(MetricObservation.connection_id == connection.id)
+        )
+        content_count = session.scalar(
+            select(func.count())
+            .select_from(ContentItem)
+            .where(ContentItem.connection_id == connection.id)
+        )
 
         assert completed is not None and completed.status == SyncStatus.SUCCEEDED
         assert content_count == 1

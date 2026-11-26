@@ -14,6 +14,11 @@ Feature 002 adds the full single-owner CommandOS workspace: readiness overview, 
 
 Feature 003 completes the pre-integration workflows with editable content briefs, deletion, creator evidence records, an accurate filtered calendar, CSRF-protected mutations and provider-neutral metric contracts.
 
+Feature 004 activates the direct YouTube analytics experience with selectable reporting periods,
+daily performance trends, top-content ranking, explicit metric units, overlap-safe manual sync and a
+lightweight daily scheduler. PostgreSQL remains the durable deployment database; the preview uses
+SQLite for local evaluation.
+
 Direct YouTube APIs are authoritative. Metricool is an optional secondary provider pending a controlled feasibility spike; it is not an automatic failover.
 
 ## Repository map
@@ -28,5 +33,6 @@ Direct YouTube APIs are authoritative. Metricool is an optional secondary provid
 - `specs/001-youtube-analytics-sync/` — Feature 001 specification, plan, and tasks.
 - `specs/002-commandos-workspace/` — Feature 002 specification, plan, and tasks.
 - `specs/003-foundation-workflows/` — Feature 003 specification, plan, and tasks.
+- `specs/004-youtube-analytics-activation/` — Feature 004 specification, plan, and tasks.
 
 No credentials belong in Git. Copy `.env.example` to an untracked `.env` for local development.

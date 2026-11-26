@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     oauth_state_ttl_seconds: int = 10 * 60
     youtube_initial_history_days: int = 90
     youtube_max_videos: int = 200
+    scheduled_sync_enabled: bool = Field(default=False, alias="COMMANDOS_SCHEDULED_SYNC_ENABLED")
+    youtube_sync_interval_hours: int = Field(
+        default=24, alias="COMMANDOS_YOUTUBE_SYNC_INTERVAL_HOURS"
+    )
+    youtube_scheduler_poll_seconds: int = Field(
+        default=60, alias="COMMANDOS_YOUTUBE_SCHEDULER_POLL_SECONDS"
+    )
 
     @field_validator("owner_email")
     @classmethod

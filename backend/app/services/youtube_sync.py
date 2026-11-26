@@ -39,6 +39,16 @@ class YouTubeSyncService:
             settings.google_redirect_uri,
         )
 
+    def active_run(self, connection_id: str) -> SyncRun | None:
+        return self.session.scalar(
+            select(SyncRun)
+            .where(
+                SyncRun.connection_id == connection_id,
+                SyncRun.status.in_([SyncStatus.QUEUED, SyncStatus.RUNNING]),
+            )
+            .order_by(SyncRun.created_at.desc())
+        )
+
     def create_run(self, connection: ProviderConnection, request_key: str | None = None) -> SyncRun:
         end_date = date.today()
         start_date = end_date - timedelta(days=self.settings.youtube_initial_history_days - 1)
@@ -83,7 +93,12 @@ class YouTubeSyncService:
             )
             end_date = date.today()
             start_date = end_date - timedelta(days=self.settings.youtube_initial_history_days - 1)
-            metrics = await self.client.analytics(access_token, start_date, end_date)
+            metrics = await self.client.analytics(
+                access_token,
+                start_date,
+                end_date,
+                [video.video_id for video in videos],
+            )
             run.records_read = len(videos) + len(metrics)
 
             content_by_provider_id: dict[str, ContentItem] = {}

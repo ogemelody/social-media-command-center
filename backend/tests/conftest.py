@@ -1,6 +1,8 @@
 import os
 
+import pytest
 from cryptography.fernet import Fernet
+from sqlalchemy.orm import Session
 
 from app.core.security import generate_password_hash
 
@@ -16,3 +18,12 @@ os.environ.setdefault("COMMANDOS_AUTO_CREATE_SCHEMA", "true")
 os.environ.setdefault("GOOGLE_CLIENT_ID", "test-client")
 os.environ.setdefault("GOOGLE_CLIENT_SECRET", "test-secret")
 os.environ.setdefault("GOOGLE_REDIRECT_URI", "http://localhost:8000/api/youtube/callback")
+
+
+@pytest.fixture
+def db_session() -> Session:
+    from app.db.session import SessionLocal, create_schema
+
+    create_schema()
+    with SessionLocal() as session:
+        yield session

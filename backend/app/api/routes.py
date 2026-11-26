@@ -2,7 +2,16 @@ import secrets
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Response,
+    status,
+)
 from fastapi.responses import RedirectResponse
 from pydantic import AnyHttpUrl, BaseModel, EmailStr, Field
 from sqlalchemy import func, select
@@ -33,6 +42,7 @@ from app.models.entities import (
 )
 from app.providers.contracts import OWNED_ANALYTICS_METRICS
 from app.providers.youtube.client import YouTubeClient, YouTubeProviderError
+from app.services.analytics import dashboard, resolve_date_range, utc_value
 from app.services.youtube_sync import YouTubeSyncService, run_sync_in_new_session
 
 router = APIRouter(prefix="/api")
@@ -231,7 +241,9 @@ async def youtube_callback(
 
 @router.get("/youtube/connection")
 def youtube_connection(
-    db: Session = Depends(get_db), _=Depends(require_owner)
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    _=Depends(require_owner),
 ) -> dict[str, object]:
     connection = db.scalar(
         select(ProviderConnection).where(ProviderConnection.provider == "youtube")
@@ -243,14 +255,31 @@ def youtube_connection(
         .where(SyncRun.connection_id == connection.id)
         .order_by(SyncRun.created_at.desc())
     )
+    latest_success = db.scalar(
+        select(SyncRun)
+        .where(
+            SyncRun.connection_id == connection.id,
+            SyncRun.status.in_(["succeeded", "partial"]),
+        )
+        .order_by(SyncRun.finished_at.desc())
+    )
+    next_due_at = None
+    if latest_success and latest_success.finished_at:
+        finished_at = utc_value(latest_success.finished_at)
+        next_due_at = finished_at + timedelta(hours=settings.youtube_sync_interval_hours)
     return {
         "connected": connection.status == "active",
         "id": connection.id,
         "channel_id": connection.external_account_id,
         "channel_name": connection.display_name,
         "status": connection.status,
-        "last_validated_at": connection.last_validated_at,
+        "last_validated_at": utc_value(connection.last_validated_at),
         "latest_run": serialize_run(latest_run) if latest_run else None,
+        "schedule": {
+            "enabled": settings.scheduled_sync_enabled,
+            "interval_hours": settings.youtube_sync_interval_hours,
+            "next_due_at": next_due_at,
+        },
     }
 
 
@@ -269,7 +298,11 @@ def start_sync(
     )
     if not connection:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="YouTube is not connected")
-    run = YouTubeSyncService(settings, db).create_run(connection, idempotency_key)
+    service = YouTubeSyncService(settings, db)
+    active = service.active_run(connection.id)
+    if active:
+        return serialize_run(active)
+    run = service.create_run(connection, idempotency_key)
     if run.status == "queued":
         background_tasks.add_task(run_sync_in_new_session, settings, run.id)
     return serialize_run(run)
@@ -317,8 +350,11 @@ def workspace_overview(
     if connection:
         latest_run = db.scalar(
             select(SyncRun)
-            .where(SyncRun.connection_id == connection.id)
-            .order_by(SyncRun.created_at.desc())
+            .where(
+                SyncRun.connection_id == connection.id,
+                SyncRun.status.in_(["succeeded", "partial"]),
+            )
+            .order_by(SyncRun.finished_at.desc())
         )
     available_metrics = db.scalar(
         select(func.count(MetricObservation.id)).where(
@@ -329,7 +365,7 @@ def workspace_overview(
     return {
         "youtube_connected": bool(connection and connection.status == "active"),
         "youtube_channel_name": connection.display_name if connection else None,
-        "last_synced_at": latest_run.finished_at if latest_run else None,
+        "last_synced_at": utc_value(latest_run.finished_at) if latest_run else None,
         "available_metric_observations": available_metrics or 0,
         "tracked_content_count": db.scalar(select(func.count(ContentItem.id))) or 0,
         "watchlist_count": db.scalar(select(func.count(CreatorWatchlistItem.id))) or 0,
@@ -355,7 +391,7 @@ def analytics_summary(db: Session = Depends(get_db), _=Depends(require_owner)) -
         "provider": "youtube",
         "connected": bool(connection and connection.status == "active"),
         "channel_name": connection.display_name if connection else None,
-        "freshness": max((item.retrieved_at for item in observations), default=None),
+        "freshness": max((utc_value(item.retrieved_at) for item in observations), default=None),
         "metrics": [
             {
                 "key": key,
@@ -369,6 +405,23 @@ def analytics_summary(db: Session = Depends(get_db), _=Depends(require_owner)) -
             for key, observation in latest_by_key.items()
         ],
     }
+
+
+@router.get("/analytics/dashboard")
+def analytics_dashboard(
+    period: Literal["7d", "28d", "90d", "custom"] = Query(default="90d", alias="range"),
+    start_date: date | None = None,
+    end_date: date | None = None,
+    db: Session = Depends(get_db),
+    _=Depends(require_owner),
+) -> dict[str, object]:
+    try:
+        actual_start, actual_end = resolve_date_range(period, start_date, end_date)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    return dashboard(db, actual_start, actual_end)
 
 
 @router.get("/analytics/metric-definitions")
@@ -613,7 +666,7 @@ def serialize_business_context(context: BusinessContext) -> dict[str, object]:
         "business_goals": context.business_goals,
         "services": context.services,
         "resources": context.resources,
-        "updated_at": context.updated_at,
+        "updated_at": utc_value(context.updated_at),
     }
 
 
@@ -625,10 +678,10 @@ def serialize_creator(creator: CreatorWatchlistItem) -> dict[str, object]:
         "profile_url": creator.profile_url,
         "niche": creator.niche,
         "notes": creator.notes,
-        "evidence_checked_at": creator.evidence_checked_at,
+        "evidence_checked_at": utc_value(creator.evidence_checked_at),
         "evidence_count": len(creator.evidence),
-        "created_at": creator.created_at,
-        "updated_at": creator.updated_at,
+        "created_at": utc_value(creator.created_at),
+        "updated_at": utc_value(creator.updated_at),
     }
 
 
@@ -642,8 +695,8 @@ def serialize_creator_evidence(evidence: CreatorEvidence) -> dict[str, object]:
         "source_url": evidence.source_url,
         "public_metrics": evidence.public_metrics,
         "limitations": evidence.limitations,
-        "observed_at": evidence.observed_at,
-        "created_at": evidence.created_at,
+        "observed_at": utc_value(evidence.observed_at),
+        "created_at": utc_value(evidence.created_at),
     }
 
 
@@ -660,8 +713,8 @@ def serialize_content_project(project: ContentProject) -> dict[str, object]:
         "source_url": project.source_url,
         "planned_for": project.planned_for,
         "published_url": project.published_url,
-        "created_at": project.created_at,
-        "updated_at": project.updated_at,
+        "created_at": utc_value(project.created_at),
+        "updated_at": utc_value(project.updated_at),
     }
 
 
@@ -669,9 +722,9 @@ def serialize_run(run: SyncRun) -> dict[str, object]:
     return {
         "id": run.id,
         "status": run.status,
-        "created_at": run.created_at,
-        "started_at": run.started_at,
-        "finished_at": run.finished_at,
+        "created_at": utc_value(run.created_at),
+        "started_at": utc_value(run.started_at),
+        "finished_at": utc_value(run.finished_at),
         "records_read": run.records_read,
         "records_written": run.records_written,
         "records_rejected": run.records_rejected,

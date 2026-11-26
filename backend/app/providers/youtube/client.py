@@ -135,9 +135,22 @@ class YouTubeClient:
                     )
                     await asyncio.sleep(min(delay, 5.0))
                     continue
-                if response.status_code in {401, 403}:
+                if response.status_code == 400:
+                    raise YouTubeProviderError(
+                        "invalid_request", "YouTube rejected an unsupported analytics request"
+                    )
+                if response.status_code == 401:
                     raise YouTubeProviderError(
                         "authorization_required", "YouTube authorization is invalid"
+                    )
+                if response.status_code == 403:
+                    raise YouTubeProviderError(
+                        "access_forbidden",
+                        "YouTube denied this request; check API access, scopes and quota",
+                    )
+                if response.status_code == 404:
+                    raise YouTubeProviderError(
+                        "provider_not_found", "The requested YouTube resource was not found"
                     )
                 if response.is_error:
                     raise YouTubeProviderError("provider_rejected", "YouTube rejected the request")
@@ -263,7 +276,11 @@ class YouTubeClient:
         return videos
 
     async def analytics(
-        self, access_token: str, start_date: date, end_date: date
+        self,
+        access_token: str,
+        start_date: date,
+        end_date: date,
+        video_ids: list[str],
     ) -> list[MetricValue]:
         metric_units = {
             "views": "count",
@@ -275,43 +292,51 @@ class YouTubeClient:
             "subscribersLost": "count",
         }
         results: list[MetricValue] = []
+        if not video_ids:
+            return results
+
         page_size = 200
-        start_index = 1
-        while True:
-            response = await self._request(
-                "GET",
-                f"{self.ANALYTICS_API}/reports",
-                headers={"Authorization": f"Bearer {access_token}"},
-                params={
-                    "ids": "channel==MINE",
-                    "startDate": start_date.isoformat(),
-                    "endDate": end_date.isoformat(),
-                    "dimensions": "day,video",
-                    "metrics": ",".join(metric_units),
-                    "sort": "day",
-                    "maxResults": page_size,
-                    "startIndex": start_index,
-                },
-            )
-            payload = response.json()
-            headers = [header["name"] for header in payload.get("columnHeaders", [])]
-            rows = payload.get("rows", []) or []
-            for raw_row in rows:
-                row = dict(zip(headers, raw_row, strict=True))
-                for key, unit in metric_units.items():
-                    if row.get(key) is not None:
-                        results.append(
-                            MetricValue(
-                                video_id=str(row["video"]),
-                                day=date.fromisoformat(str(row["day"])),
-                                metric_key=key,
-                                unit=unit,
-                                value=float(row[key]),
+        # YouTube only permits the video dimension when the request also
+        # filters to one or more video IDs. A filter accepts at most 500 IDs.
+        for offset in range(0, len(video_ids), 500):
+            video_batch = video_ids[offset : offset + 500]
+            start_index = 1
+            while True:
+                response = await self._request(
+                    "GET",
+                    f"{self.ANALYTICS_API}/reports",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    params={
+                        "ids": "channel==MINE",
+                        "startDate": start_date.isoformat(),
+                        "endDate": end_date.isoformat(),
+                        "dimensions": "day,video",
+                        "filters": f"video=={','.join(video_batch)}",
+                        "metrics": ",".join(metric_units),
+                        "sort": "day",
+                        "maxResults": page_size,
+                        "startIndex": start_index,
+                    },
+                )
+                payload = response.json()
+                headers = [header["name"] for header in payload.get("columnHeaders", [])]
+                rows = payload.get("rows", []) or []
+                for raw_row in rows:
+                    row = dict(zip(headers, raw_row, strict=True))
+                    for key, unit in metric_units.items():
+                        if row.get(key) is not None:
+                            results.append(
+                                MetricValue(
+                                    video_id=str(row["video"]),
+                                    day=date.fromisoformat(str(row["day"])),
+                                    metric_key=key,
+                                    unit=unit,
+                                    value=float(row[key]),
+                                )
                             )
-                        )
-            if len(rows) < page_size:
-                break
-            start_index += page_size
+                if len(rows) < page_size:
+                    break
+                start_index += page_size
         return results
 
     async def revoke(self, token: str) -> bool:
