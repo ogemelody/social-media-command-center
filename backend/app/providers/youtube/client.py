@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
@@ -51,6 +51,28 @@ class MetricValue:
     value: float
 
 
+@dataclass(frozen=True)
+class YouTubePublicVideo:
+    video_id: str
+    title: str
+    description: str
+    published_at: datetime
+    duration_seconds: int | None
+    thumbnail_url: str | None
+    views: int | None
+    likes: int | None
+    comments: int | None
+
+
+@dataclass(frozen=True)
+class YouTubePublicComment:
+    comment_id: str
+    text: str
+    author_name: str | None
+    like_count: int | None
+    published_at: datetime
+
+
 def parse_iso8601_duration(value: str | None) -> int | None:
     if not value:
         return None
@@ -77,12 +99,26 @@ class YouTubeClient:
         client_secret: str,
         redirect_uri: str,
         *,
+        api_key: str = "",
         timeout_seconds: float = 30.0,
     ) -> None:
         self.client_id = client_id
         self.client_secret = client_secret
         self.redirect_uri = redirect_uri
+        self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+
+    @staticmethod
+    def _google_error_reason(response: httpx.Response) -> str | None:
+        """Read Google's stable error reason without retaining response content."""
+        try:
+            errors = response.json().get("error", {}).get("errors", [])
+        except (ValueError, AttributeError):
+            return None
+        if not errors or not isinstance(errors[0], dict):
+            return None
+        reason = errors[0].get("reason")
+        return str(reason) if reason else None
 
     def authorization_url(self, state: str, code_challenge: str) -> str:
         params = {
@@ -135,15 +171,33 @@ class YouTubeClient:
                     )
                     await asyncio.sleep(min(delay, 5.0))
                     continue
+                reason = self._google_error_reason(response)
                 if response.status_code == 400:
+                    if reason == "commentsDisabled":
+                        raise YouTubeProviderError(
+                            "comments_disabled", "Comments are disabled for this video"
+                        )
                     raise YouTubeProviderError(
-                        "invalid_request", "YouTube rejected an unsupported analytics request"
+                        "invalid_request", "YouTube rejected this request"
                     )
                 if response.status_code == 401:
                     raise YouTubeProviderError(
                         "authorization_required", "YouTube authorization is invalid"
                     )
                 if response.status_code == 403:
+                    if reason == "commentsDisabled":
+                        raise YouTubeProviderError(
+                            "comments_disabled", "Comments are disabled for this video"
+                        )
+                    if reason in {"quotaExceeded", "dailyLimitExceeded"}:
+                        raise YouTubeProviderError(
+                            "quota_exceeded", "The YouTube API quota has been exhausted"
+                        )
+                    if reason in {"insufficientPermissions", "forbidden"}:
+                        raise YouTubeProviderError(
+                            "insufficient_permissions",
+                            "YouTube did not grant access to this resource",
+                        )
                     raise YouTubeProviderError(
                         "access_forbidden",
                         "YouTube denied this request; check API access, scopes and quota",
@@ -217,6 +271,144 @@ class YouTubeClient:
             title=item["snippet"]["title"],
             uploads_playlist_id=item["contentDetails"]["relatedPlaylists"]["uploads"],
         )
+
+    async def public_channel(self, access_token: str, profile_url: str) -> YouTubeChannel:
+        path = urlparse(profile_url).path.strip("/")
+        params: dict[str, str] = {"part": "snippet,contentDetails"}
+        if path.startswith("@"):
+            params["forHandle"] = path
+        elif path.startswith("channel/") and len(path.split("/", 1)[1]) > 0:
+            params["id"] = path.split("/", 1)[1]
+        elif path and "/" not in path:
+            params["forUsername"] = path
+        else:
+            raise YouTubeProviderError(
+                "unsupported_channel_url",
+                "Use a YouTube username, @handle or /channel/ URL",
+            )
+        response = await self._request(
+            "GET",
+            f"{self.DATA_API}/channels",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params=params,
+        )
+        items = response.json().get("items", [])
+        if len(items) != 1:
+            raise YouTubeProviderError(
+                "channel_not_found", "The saved YouTube channel was not found"
+            )
+        item = items[0]
+        return YouTubeChannel(
+            channel_id=item["id"],
+            title=item["snippet"]["title"],
+            uploads_playlist_id=item["contentDetails"]["relatedPlaylists"]["uploads"],
+        )
+
+    async def public_videos(
+        self, access_token: str, uploads_playlist_id: str, limit: int = 20
+    ) -> list[YouTubePublicVideo]:
+        playlist = await self._request(
+            "GET",
+            f"{self.DATA_API}/playlistItems",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "part": "contentDetails",
+                "playlistId": uploads_playlist_id,
+                "maxResults": min(limit, 50),
+            },
+        )
+        video_ids = [
+            item["contentDetails"]["videoId"]
+            for item in playlist.json().get("items", [])
+            if item.get("contentDetails", {}).get("videoId")
+        ]
+        if not video_ids:
+            return []
+        response = await self._request(
+            "GET",
+            f"{self.DATA_API}/videos",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "part": "snippet,contentDetails,statistics",
+                "id": ",".join(video_ids),
+                "maxResults": 50,
+            },
+        )
+        results: list[YouTubePublicVideo] = []
+        for item in response.json().get("items", []):
+            snippet = item["snippet"]
+            statistics = item.get("statistics", {})
+            thumbnails = snippet.get("thumbnails", {})
+            thumbnail = (
+                thumbnails.get("high")
+                or thumbnails.get("medium")
+                or thumbnails.get("default")
+            )
+            results.append(
+                YouTubePublicVideo(
+                    video_id=item["id"],
+                    title=snippet["title"],
+                    description=snippet.get("description", ""),
+                    published_at=datetime.fromisoformat(
+                        snippet["publishedAt"].replace("Z", "+00:00")
+                    ),
+                    duration_seconds=parse_iso8601_duration(
+                        item.get("contentDetails", {}).get("duration")
+                    ),
+                    thumbnail_url=thumbnail.get("url") if thumbnail else None,
+                    views=int(statistics["viewCount"]) if "viewCount" in statistics else None,
+                    likes=int(statistics["likeCount"]) if "likeCount" in statistics else None,
+                    comments=(
+                        int(statistics["commentCount"])
+                        if "commentCount" in statistics
+                        else None
+                    ),
+                )
+            )
+        return results
+
+    async def public_comments(
+        self, _access_token: str, video_id: str, limit: int = 100
+    ) -> list[YouTubePublicComment]:
+        if not self.api_key:
+            raise YouTubeProviderError(
+                "public_api_key_required",
+                "A restricted YouTube API key is required for public comment research",
+            )
+        response = await self._request(
+            "GET",
+            f"{self.DATA_API}/commentThreads",
+            params={
+                "part": "snippet",
+                "videoId": video_id,
+                "order": "relevance",
+                "textFormat": "plainText",
+                "maxResults": min(limit, 100),
+                "key": self.api_key,
+            },
+            attempts=1,
+        )
+        comments: list[YouTubePublicComment] = []
+        for item in response.json().get("items", []):
+            top = item.get("snippet", {}).get("topLevelComment", {})
+            snippet = top.get("snippet", {})
+            published_at = snippet.get("publishedAt")
+            if not top.get("id") or not published_at:
+                continue
+            comments.append(
+                YouTubePublicComment(
+                    comment_id=top["id"],
+                    text=snippet.get("textDisplay", ""),
+                    author_name=snippet.get("authorDisplayName"),
+                    like_count=(
+                        int(snippet["likeCount"])
+                        if snippet.get("likeCount") is not None
+                        else None
+                    ),
+                    published_at=datetime.fromisoformat(published_at.replace("Z", "+00:00")),
+                )
+            )
+        return comments
 
     async def videos(
         self, access_token: str, uploads_playlist_id: str, limit: int

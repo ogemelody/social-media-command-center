@@ -10,6 +10,10 @@ preview_backend_port="8001"
 preview_frontend_url="http://127.0.0.1:$preview_frontend_port"
 preview_backend_url="http://127.0.0.1:$preview_backend_port"
 preview_env_file="$preview_root/backend/.env"
+preview_data_dir="$preview_root/.data"
+preview_database_file="$preview_data_dir/commandos-preview.db"
+
+mkdir -p "$preview_data_dir"
 
 if [[ ! -x "$preview_python" || ! -x "$preview_uvicorn" ]]; then
   echo "Backend dependencies are missing. Run:"
@@ -47,7 +51,7 @@ trap cleanup_preview EXIT INT TERM
   export COMMANDOS_OWNER_EMAIL="owner@example.com"
   export COMMANDOS_OWNER_PASSWORD_HASH="$preview_password_hash"
   export COMMANDOS_SESSION_SECRET="$preview_session_secret"
-  export COMMANDOS_DATABASE_URL="sqlite:////tmp/commandos-preview.db"
+  export COMMANDOS_DATABASE_URL="sqlite:///$preview_database_file"
   export COMMANDOS_AUTO_CREATE_SCHEMA="true"
   export COMMANDOS_FRONTEND_ORIGIN="$preview_frontend_url"
   export COMMANDOS_SCHEDULED_SYNC_ENABLED="true"
@@ -59,6 +63,11 @@ trap cleanup_preview EXIT INT TERM
     export GOOGLE_CLIENT_SECRET="preview-secret"
     export GOOGLE_REDIRECT_URI="$preview_backend_url/api/youtube/callback"
   fi
+  preview_db_state="$($preview_python "$preview_root/scripts/preview-db-state.py")"
+  if [[ "$preview_db_state" == "legacy" ]]; then
+    "$preview_root/.venv/bin/alembic" -c alembic.ini stamp af61d0e4c849
+  fi
+  "$preview_root/.venv/bin/alembic" -c alembic.ini upgrade head
   exec "$preview_uvicorn" app.main:app --host 127.0.0.1 --port "$preview_backend_port"
 ) &
 preview_backend_pid=$!
@@ -69,6 +78,7 @@ echo "URL:      $preview_frontend_url"
 echo "Email:    owner@example.com"
 echo "Password: $preview_password"
 echo "YouTube:  $preview_oauth_status"
+echo "Data:     $preview_database_file (persistent local preview data)"
 echo
 echo "Keep this terminal open. Press Ctrl+C to stop the preview."
 echo

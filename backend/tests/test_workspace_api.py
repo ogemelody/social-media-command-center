@@ -1,6 +1,10 @@
+from datetime import UTC, datetime
+
 from fastapi.testclient import TestClient
 
+from app.db.session import SessionLocal
 from app.main import app
+from app.models.entities import CreatorVideo, CreatorVideoComment
 
 
 def owner_client() -> TestClient:
@@ -42,14 +46,25 @@ def test_owner_workspace_persists_context_creator_and_content() -> None:
             "/api/creators",
             json={
                 "name": "Evidence Creator",
-                "platform": "youtube",
-                "profile_url": "https://youtube.com/@evidence-creator",
                 "niche": "Data Engineering",
                 "notes": "Public-source research only",
+                "profiles": [
+                    {
+                        "platform": "youtube",
+                        "profile_url": "https://youtube.com/@evidence-creator",
+                    },
+                    {
+                        "platform": "instagram",
+                        "profile_url": "https://instagram.com/evidence-creator",
+                    },
+                ],
             },
         )
         assert creator.status_code == 201
-        assert creator.json()["profile_url"].startswith("https://youtube.com/")
+        assert {profile["platform"] for profile in creator.json()["profiles"]} == {
+            "youtube",
+            "instagram",
+        }
         creator_id = creator.json()["id"]
 
         evidence = client.post(
@@ -101,6 +116,63 @@ def test_owner_workspace_persists_context_creator_and_content() -> None:
         client.__exit__(None, None, None)
 
 
+def test_creator_identity_cannot_be_duplicated_across_platforms() -> None:
+    client = owner_client()
+    try:
+        first = client.post(
+            "/api/creators",
+            json={
+                "name": "Keerti Purswani",
+                "niche": "Data Engineering",
+                "notes": "Clear teaching style",
+                "profiles": [
+                    {
+                        "platform": "youtube",
+                        "profile_url": "https://youtube.com/@keertipurswani",
+                    }
+                ],
+            },
+        )
+        assert first.status_code == 201
+
+        duplicate = client.post(
+            "/api/creators",
+            json={
+                "name": "keerti.purswani",
+                "niche": "AI Engineering and AI Agents",
+                "notes": "Instagram profile",
+                "profiles": [
+                    {
+                        "platform": "instagram",
+                        "profile_url": "https://instagram.com/keerti.purswani",
+                    }
+                ],
+            },
+        )
+        assert duplicate.status_code == 409
+        assert "existing profile" in duplicate.json()["detail"]
+
+        updated = client.patch(
+            f"/api/creators/{first.json()['id']}",
+            json={
+                "profiles": [
+                    {
+                        "platform": "youtube",
+                        "profile_url": "https://youtube.com/@keertipurswani",
+                    },
+                    {
+                        "platform": "instagram",
+                        "profile_url": "https://instagram.com/keerti.purswani",
+                    },
+                ]
+            },
+        )
+        assert updated.status_code == 200
+        assert len(updated.json()["profiles"]) == 2
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_analytics_does_not_turn_missing_metrics_into_zero() -> None:
     client = owner_client()
     try:
@@ -121,5 +193,94 @@ def test_custom_analytics_range_requires_both_dates() -> None:
         assert (
             response.json()["detail"] == "Custom ranges require both a start date and an end date"
         )
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_creator_research_exposes_relative_performance_and_questions() -> None:
+    client = owner_client()
+    try:
+        creator = client.post(
+            "/api/creators",
+            json={
+                "name": "Research Contract Creator",
+                "niche": "Data Engineering",
+                "notes": "Research contract",
+                "profiles": [
+                    {
+                        "platform": "youtube",
+                        "profile_url": "https://youtube.com/@research-contract",
+                    }
+                ],
+            },
+        )
+        assert creator.status_code == 201
+        creator_id = creator.json()["id"]
+        now = datetime.now(UTC)
+        with SessionLocal() as session:
+            videos = []
+            for index, views in enumerate((100, 100, 300)):
+                video = CreatorVideo(
+                    creator_id=creator_id,
+                    provider_video_id=f"research-video-{index}",
+                    title=f"Research video {index}",
+                    description="A public description",
+                    source_url=f"https://youtube.com/watch?v=research-video-{index}",
+                    published_at=now,
+                    views=views,
+                    likes=10,
+                    comments_count=2,
+                )
+                session.add(video)
+                session.flush()
+                videos.append(video)
+            session.add(
+                CreatorVideoComment(
+                    video_id=videos[-1].id,
+                    provider_comment_id="research-question",
+                    text="Can you show the architecture?",
+                    author_name="Viewer",
+                    like_count=4,
+                    published_at=now,
+                    source_url="https://youtube.com/watch?v=research-video-2&lc=research-question",
+                )
+            )
+            session.commit()
+
+        response = client.get(f"/api/creators/{creator_id}/youtube/research")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["baseline"] == {"metric": "views", "median": 100, "sample_size": 3}
+        breakout = next(
+            video for video in body["videos"] if video["public_metrics"]["views"] == 300
+        )
+        assert breakout["performance_label"] == "breakout"
+        assert breakout["relative_view_ratio"] == 3.0
+        assert breakout["audience_questions"][0]["text"] == "Can you show the architecture?"
+        assert any("Spoken hooks" in limitation for limitation in body["limitations"])
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_creator_refresh_requires_a_youtube_profile() -> None:
+    client = owner_client()
+    try:
+        creator = client.post(
+            "/api/creators",
+            json={
+                "name": "Instagram Only Research Creator",
+                "niche": "Data Engineering",
+                "profiles": [
+                    {
+                        "platform": "instagram",
+                        "profile_url": "https://instagram.com/research-contract-only",
+                    }
+                ],
+            },
+        )
+        assert creator.status_code == 201
+        response = client.post(f"/api/creators/{creator.json()['id']}/youtube/refresh")
+        assert response.status_code == 409
+        assert "YouTube profile" in response.json()["detail"]
     finally:
         client.__exit__(None, None, None)

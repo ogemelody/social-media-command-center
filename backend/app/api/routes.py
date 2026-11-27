@@ -1,5 +1,6 @@
 import secrets
 from datetime import UTC, date, datetime, timedelta
+from statistics import median
 from typing import Literal
 
 from fastapi import (
@@ -13,7 +14,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import RedirectResponse
-from pydantic import AnyHttpUrl, BaseModel, EmailStr, Field
+from pydantic import AnyHttpUrl, BaseModel, EmailStr, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -33,6 +34,9 @@ from app.models.entities import (
     ContentItem,
     ContentProject,
     CreatorEvidence,
+    CreatorPlatformProfile,
+    CreatorResearchRun,
+    CreatorVideo,
     CreatorWatchlistItem,
     MetricObservation,
     OAuthAttempt,
@@ -43,9 +47,14 @@ from app.models.entities import (
 from app.providers.contracts import OWNED_ANALYTICS_METRICS
 from app.providers.youtube.client import YouTubeClient, YouTubeProviderError
 from app.services.analytics import dashboard, resolve_date_range, utc_value
+from app.services.creator_research import CreatorResearchService
 from app.services.youtube_sync import YouTubeSyncService, run_sync_in_new_session
 
 router = APIRouter(prefix="/api")
+
+
+def normalize_creator_name(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
 
 
 class LoginRequest(BaseModel):
@@ -63,20 +72,41 @@ class BusinessContextPayload(BaseModel):
     resources: list[str] = Field(default_factory=list, max_length=30)
 
 
-class CreatorPayload(BaseModel):
-    name: str = Field(min_length=1, max_length=255)
+class CreatorProfilePayload(BaseModel):
     platform: Literal["youtube", "instagram", "tiktok", "linkedin"]
     profile_url: AnyHttpUrl
+
+
+class CreatorPayload(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
     niche: str = Field(min_length=1, max_length=100)
     notes: str = Field(default="", max_length=4000)
+    profiles: list[CreatorProfilePayload] = Field(min_length=1, max_length=4)
+
+    @model_validator(mode="after")
+    def profiles_are_unique(self) -> "CreatorPayload":
+        platforms = [profile.platform for profile in self.profiles]
+        if len(platforms) != len(set(platforms)):
+            raise ValueError("A creator can only have one profile per platform")
+        return self
 
 
 class CreatorUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
-    platform: Literal["youtube", "instagram", "tiktok", "linkedin"] | None = None
-    profile_url: AnyHttpUrl | None = None
     niche: str | None = Field(default=None, min_length=1, max_length=100)
     notes: str | None = Field(default=None, max_length=4000)
+    profiles: list[CreatorProfilePayload] | None = Field(
+        default=None, min_length=1, max_length=4
+    )
+
+    @model_validator(mode="after")
+    def profiles_are_unique(self) -> "CreatorUpdate":
+        if self.profiles is None:
+            return self
+        platforms = [profile.platform for profile in self.profiles]
+        if len(platforms) != len(set(platforms)):
+            raise ValueError("A creator can only have one profile per platform")
+        return self
 
 
 class CreatorEvidencePayload(BaseModel):
@@ -481,9 +511,22 @@ def create_creator(
     db: Session = Depends(get_db),
     _=Depends(require_csrf),
 ) -> dict[str, object]:
+    existing_names = db.scalars(select(CreatorWatchlistItem.name)).all()
+    if normalize_creator_name(payload.name) in {
+        normalize_creator_name(name) for name in existing_names
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This creator already exists; add the platform to their existing profile",
+        )
     creator = CreatorWatchlistItem(
-        **payload.model_dump(exclude={"profile_url"}),
-        profile_url=str(payload.profile_url),
+        **payload.model_dump(exclude={"profiles"}),
+        profiles=[
+            CreatorPlatformProfile(
+                platform=profile.platform, profile_url=str(profile.profile_url)
+            )
+            for profile in payload.profiles
+        ],
     )
     db.add(creator)
     try:
@@ -492,7 +535,7 @@ def create_creator(
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="This creator profile is already on the watchlist",
+            detail="One of these platform profiles is already on the watchlist",
         ) from exc
     db.refresh(creator)
     return serialize_creator(creator)
@@ -508,11 +551,29 @@ def update_creator(
     creator = db.get(CreatorWatchlistItem, creator_id)
     if not creator:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Creator not found")
-    data = payload.model_dump(exclude_unset=True)
-    if data.get("profile_url") is not None:
-        data["profile_url"] = str(data["profile_url"])
+    if payload.name is not None:
+        existing_names = db.scalars(
+            select(CreatorWatchlistItem.name).where(CreatorWatchlistItem.id != creator_id)
+        ).all()
+        if normalize_creator_name(payload.name) in {
+            normalize_creator_name(name) for name in existing_names
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This creator already exists; combine the platform profiles instead",
+            )
+    data = payload.model_dump(exclude_unset=True, exclude={"profiles"})
     for key, value in data.items():
         setattr(creator, key, value)
+    if payload.profiles is not None:
+        creator.profiles.clear()
+        db.flush()
+        creator.profiles.extend(
+            CreatorPlatformProfile(
+                platform=profile.platform, profile_url=str(profile.profile_url)
+            )
+            for profile in payload.profiles
+        )
     creator.updated_at = utcnow()
     try:
         db.commit()
@@ -520,7 +581,7 @@ def update_creator(
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="This creator profile is already on the watchlist",
+            detail="One of these platform profiles is already on the watchlist",
         ) from exc
     db.refresh(creator)
     return serialize_creator(creator)
@@ -595,6 +656,74 @@ def delete_creator(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Creator not found")
     db.delete(creator)
     db.commit()
+
+
+@router.post("/creators/{creator_id}/youtube/refresh")
+async def refresh_creator_youtube(
+    creator_id: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    _=Depends(require_csrf),
+) -> dict[str, object]:
+    creator = db.get(CreatorWatchlistItem, creator_id)
+    if not creator:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Creator not found")
+    try:
+        run = await CreatorResearchService(settings, db).refresh(creator)
+    except YouTubeProviderError as exc:
+        code = (
+            status.HTTP_409_CONFLICT
+            if exc.code
+            in {"youtube_profile_required", "authorization_required", "unsupported_channel_url"}
+            else status.HTTP_502_BAD_GATEWAY
+        )
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+    return serialize_creator_research_run(run)
+
+
+@router.get("/creators/{creator_id}/youtube/research")
+def creator_youtube_research(
+    creator_id: str,
+    db: Session = Depends(get_db),
+    _=Depends(require_owner),
+) -> dict[str, object]:
+    creator = db.get(CreatorWatchlistItem, creator_id)
+    if not creator:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Creator not found")
+    profile = next((item for item in creator.profiles if item.platform == "youtube"), None)
+    videos = list(
+        db.scalars(
+            select(CreatorVideo)
+            .where(CreatorVideo.creator_id == creator_id, CreatorVideo.provider == "youtube")
+            .order_by(CreatorVideo.published_at.desc())
+            .limit(20)
+        )
+    )
+    view_values = [video.views for video in videos if video.views is not None]
+    view_baseline = median(view_values) if view_values else None
+    latest_run = db.scalar(
+        select(CreatorResearchRun)
+        .where(
+            CreatorResearchRun.creator_id == creator_id,
+            CreatorResearchRun.provider == "youtube",
+        )
+        .order_by(CreatorResearchRun.started_at.desc())
+    )
+    return {
+        "creator_id": creator_id,
+        "available": profile is not None,
+        "channel_id": profile.provider_account_id if profile else None,
+        "freshness": utc_value(profile.last_synced_at) if profile else None,
+        "baseline": {"metric": "views", "median": view_baseline, "sample_size": len(videos)},
+        "latest_run": serialize_creator_research_run(latest_run) if latest_run else None,
+        "limitations": [
+            "Public totals are snapshots and are not reach or retention metrics.",
+            "Breakout is a derived comparison with this creator's synchronized median views.",
+            "Comments are a bounded relevance-ranked sample from at most five videos.",
+            "Spoken hooks, private analytics and audience demographics are unavailable.",
+        ],
+        "videos": [serialize_creator_video(video, view_baseline) for video in videos],
+    }
 
 
 @router.get("/content-projects")
@@ -674,8 +803,14 @@ def serialize_creator(creator: CreatorWatchlistItem) -> dict[str, object]:
     return {
         "id": creator.id,
         "name": creator.name,
-        "platform": creator.platform,
-        "profile_url": creator.profile_url,
+        "profiles": [
+            {
+                "id": profile.id,
+                "platform": profile.platform,
+                "profile_url": profile.profile_url,
+            }
+            for profile in sorted(creator.profiles, key=lambda item: item.platform)
+        ],
         "niche": creator.niche,
         "notes": creator.notes,
         "evidence_checked_at": utc_value(creator.evidence_checked_at),
@@ -697,6 +832,55 @@ def serialize_creator_evidence(evidence: CreatorEvidence) -> dict[str, object]:
         "limitations": evidence.limitations,
         "observed_at": utc_value(evidence.observed_at),
         "created_at": utc_value(evidence.created_at),
+    }
+
+
+def serialize_creator_research_run(run: CreatorResearchRun) -> dict[str, object]:
+    return {
+        "id": run.id,
+        "status": run.status,
+        "estimated_quota_units": run.estimated_quota_units,
+        "records_read": run.records_read,
+        "records_written": run.records_written,
+        "error_summary": run.error_summary,
+        "started_at": utc_value(run.started_at),
+        "finished_at": utc_value(run.finished_at),
+    }
+
+
+def serialize_creator_video(video: CreatorVideo, baseline: float | None) -> dict[str, object]:
+    ratio = (video.views / baseline) if video.views is not None and baseline else None
+    comments = sorted(video.comments, key=lambda item: item.like_count or 0, reverse=True)
+    return {
+        "id": video.id,
+        "provider_video_id": video.provider_video_id,
+        "title": video.title,
+        "description": video.description,
+        "source_url": video.source_url,
+        "thumbnail_url": video.thumbnail_url,
+        "published_at": utc_value(video.published_at),
+        "duration_seconds": video.duration_seconds,
+        "public_metrics": {
+            "views": video.views,
+            "likes": video.likes,
+            "comments": video.comments_count,
+        },
+        "relative_view_ratio": round(ratio, 2) if ratio is not None else None,
+        "performance_label": "breakout" if ratio is not None and ratio >= 2 else "typical",
+        "retrieved_at": utc_value(video.retrieved_at),
+        "audience_questions": [
+            {
+                "id": comment.id,
+                "text": comment.text,
+                "author_name": comment.author_name,
+                "like_count": comment.like_count,
+                "published_at": utc_value(comment.published_at),
+                "source_url": comment.source_url,
+            }
+            for comment in comments
+            if "?" in comment.text
+        ],
+        "comment_sample_size": len(comments),
     }
 
 

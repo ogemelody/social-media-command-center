@@ -86,7 +86,7 @@ class YouTubeSyncService:
         self.session.commit()
 
         try:
-            access_token = await self._valid_access_token(connection)
+            access_token = await self.valid_access_token(connection)
             channel = await self.client.channel(access_token)
             videos = await self.client.videos(
                 access_token, channel.uploads_playlist_id, self.settings.youtube_max_videos
@@ -185,7 +185,7 @@ class YouTubeSyncService:
                 run.finished_at = datetime.now(UTC)
                 self.session.commit()
 
-    async def _valid_access_token(self, connection: ProviderConnection) -> str:
+    async def valid_access_token(self, connection: ProviderConnection) -> str:
         if not connection.encrypted_access_token:
             raise YouTubeProviderError("authorization_required", "YouTube must be reconnected")
         access_token = self.cipher.decrypt(connection.encrypted_access_token)

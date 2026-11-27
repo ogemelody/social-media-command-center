@@ -49,6 +49,9 @@ Disconnect immediately disables jobs, attempts token revocation, removes credent
 
 ## Implemented local workflow records
 
-- `creator_watchlist_items` stores each curated public creator profile.
-- `creator_evidence` stores a public source URL, factual observation, observation time, available public metrics, and explicit limitations. Creator deletion cascades to these records.
+- `creator_watchlist_items` stores a provider-neutral creator identity, niche and owner-authored inspiration notes.
+- `creator_platform_profiles` stores one public profile URL per platform for a creator. A creator is represented once even when researched across several platforms.
+- `creator_evidence` stores a public source URL, factual observation, observation time, available public metrics, and explicit limitations. Creator deletion cascades to profiles and evidence records.
+- `creator_research_runs` records the status, estimated quota units, freshness and row counts for each deliberate provider refresh.
+- `creator_videos` stores bounded public YouTube video snapshots with source provenance; `creator_video_comments` stores the bounded top-level comment sample used to identify audience questions. Both are deleted with their canonical creator.
 - `content_projects` stores the platform, type, pillar, hook, brief, evidence URL, planned date, publishing URL, and production status. Calendar placement is derived directly from `planned_for`.

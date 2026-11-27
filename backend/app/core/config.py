@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     google_client_id: str = Field(alias="GOOGLE_CLIENT_ID")
     google_client_secret: SecretStr = Field(alias="GOOGLE_CLIENT_SECRET")
     google_redirect_uri: str = Field(alias="GOOGLE_REDIRECT_URI")
+    youtube_api_key: SecretStr = Field(default=SecretStr(""), alias="YOUTUBE_API_KEY")
 
     session_ttl_seconds: int = 8 * 60 * 60
     oauth_state_ttl_seconds: int = 10 * 60

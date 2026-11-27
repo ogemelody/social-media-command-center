@@ -19,6 +19,12 @@ daily performance trends, top-content ranking, explicit metric units, overlap-sa
 lightweight daily scheduler. PostgreSQL remains the durable deployment database; the preview uses
 SQLite for local evaluation.
 
+Feature 005 establishes canonical creator identities so one creator can hold multiple public platform
+profiles without fragmenting evidence, inspiration notes or future cross-platform analysis.
+
+Feature 006 adds deliberate, quota-controlled YouTube creator research: recent public videos, relative
+breakout signals, bounded public-comment samples, audience questions, freshness and source provenance.
+
 Direct YouTube APIs are authoritative. Metricool is an optional secondary provider pending a controlled feasibility spike; it is not an automatic failover.
 
 ## Repository map
@@ -34,5 +40,11 @@ Direct YouTube APIs are authoritative. Metricool is an optional secondary provid
 - `specs/002-commandos-workspace/` — Feature 002 specification, plan, and tasks.
 - `specs/003-foundation-workflows/` — Feature 003 specification, plan, and tasks.
 - `specs/004-youtube-analytics-activation/` — Feature 004 specification, plan, and tasks.
+- `specs/005-creator-identity-profiles/` — Feature 005 specification, plan, and tasks.
+- `specs/006-youtube-creator-intelligence/` — Feature 006 specification, plan, and tasks.
 
 No credentials belong in Git. Copy `.env.example` to an untracked `.env` for local development.
+
+The local preview stores durable application state in the ignored `.data/commandos-preview.db`
+file. Stopping or restarting the preview does not delete connections, creator profiles or analytics.
+Deleting that file intentionally resets the local workspace.

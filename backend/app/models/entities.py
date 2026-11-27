@@ -143,12 +143,9 @@ class BusinessContext(Base):
 
 class CreatorWatchlistItem(Base):
     __tablename__ = "creator_watchlist_items"
-    __table_args__ = (UniqueConstraint("platform", "profile_url"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     name: Mapped[str] = mapped_column(String(255))
-    platform: Mapped[str] = mapped_column(String(32))
-    profile_url: Mapped[str] = mapped_column(Text)
     niche: Mapped[str] = mapped_column(String(100))
     notes: Mapped[str] = mapped_column(Text, default="")
     evidence_checked_at: Mapped[datetime | None] = mapped_column(
@@ -160,6 +157,94 @@ class CreatorWatchlistItem(Base):
     evidence: Mapped[list["CreatorEvidence"]] = relationship(
         cascade="all, delete-orphan", back_populates="creator"
     )
+    profiles: Mapped[list["CreatorPlatformProfile"]] = relationship(
+        cascade="all, delete-orphan", back_populates="creator"
+    )
+    research_runs: Mapped[list["CreatorResearchRun"]] = relationship(
+        cascade="all, delete-orphan", back_populates="creator"
+    )
+    videos: Mapped[list["CreatorVideo"]] = relationship(
+        cascade="all, delete-orphan", back_populates="creator"
+    )
+
+
+class CreatorPlatformProfile(Base):
+    __tablename__ = "creator_platform_profiles"
+    __table_args__ = (
+        UniqueConstraint("creator_id", "platform"),
+        UniqueConstraint("platform", "profile_url"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    creator_id: Mapped[str] = mapped_column(ForeignKey("creator_watchlist_items.id"))
+    platform: Mapped[str] = mapped_column(String(32))
+    profile_url: Mapped[str] = mapped_column(Text)
+    provider_account_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    uploads_playlist_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    creator: Mapped[CreatorWatchlistItem] = relationship(back_populates="profiles")
+
+
+class CreatorResearchRun(Base):
+    __tablename__ = "creator_research_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    creator_id: Mapped[str] = mapped_column(ForeignKey("creator_watchlist_items.id"))
+    provider: Mapped[str] = mapped_column(String(32), default="youtube")
+    status: Mapped[str] = mapped_column(String(32), default="running")
+    estimated_quota_units: Mapped[int] = mapped_column(default=0)
+    records_read: Mapped[int] = mapped_column(default=0)
+    records_written: Mapped[int] = mapped_column(default=0)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    creator: Mapped[CreatorWatchlistItem] = relationship(back_populates="research_runs")
+
+
+class CreatorVideo(Base):
+    __tablename__ = "creator_videos"
+    __table_args__ = (UniqueConstraint("provider", "provider_video_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    creator_id: Mapped[str] = mapped_column(ForeignKey("creator_watchlist_items.id"))
+    provider: Mapped[str] = mapped_column(String(32), default="youtube")
+    provider_video_id: Mapped[str] = mapped_column(String(255))
+    title: Mapped[str] = mapped_column(Text)
+    description: Mapped[str] = mapped_column(Text, default="")
+    source_url: Mapped[str] = mapped_column(Text)
+    thumbnail_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    duration_seconds: Mapped[int | None] = mapped_column(nullable=True)
+    views: Mapped[int | None] = mapped_column(nullable=True)
+    likes: Mapped[int | None] = mapped_column(nullable=True)
+    comments_count: Mapped[int | None] = mapped_column(nullable=True)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    creator: Mapped[CreatorWatchlistItem] = relationship(back_populates="videos")
+    comments: Mapped[list["CreatorVideoComment"]] = relationship(
+        cascade="all, delete-orphan", back_populates="video"
+    )
+
+
+class CreatorVideoComment(Base):
+    __tablename__ = "creator_video_comments"
+    __table_args__ = (UniqueConstraint("provider", "provider_comment_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    video_id: Mapped[str] = mapped_column(ForeignKey("creator_videos.id"))
+    provider: Mapped[str] = mapped_column(String(32), default="youtube")
+    provider_comment_id: Mapped[str] = mapped_column(String(255))
+    text: Mapped[str] = mapped_column(Text)
+    author_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    like_count: Mapped[int | None] = mapped_column(nullable=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source_url: Mapped[str] = mapped_column(Text)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    video: Mapped[CreatorVideo] = relationship(back_populates="comments")
 
 
 class CreatorEvidence(Base):
