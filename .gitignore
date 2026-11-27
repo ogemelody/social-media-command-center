@@ -8,3 +8,8 @@ __pycache__/
 node_modules/
 dist/
 coverage/
+.venv/
+*.db
+*.db-shm
+*.db-wal
+frontend/.vite/
